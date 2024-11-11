@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=41", "setuptools-git-versioning<2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchfunsor"
+authors = [
+  { name="Yerdos Ordabayev", email="yerdos2030@gmail.com" },
+]
+description = "Functional tensors library"
+readme = "README.rst"
+requires-python = ">=3.10"
+license = {file = "LICENSE.md"}
+classifiers = [
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+  "numpy>=2.0.0",
+  "torch>=2.2.0",
+]
+
+dynamic = ["version"]
+
+[project.optional-dependencies]
+lint = ["ruff"]
+mypy = ["mypy"]
+test = [
+  "pytest-xdist",
+]
+docs = [
+  "nbsphinx",
+  "Pillow",
+  "sphinx",
+  "sphinx_rtd_theme",
+  "sphinx-copybutton",
+]
+dev = ["torchfunsor[docs,lint,mypy,test]"]
+
+[project.urls]
+"Homepage" = "https://cellarium-ai.github.io/cellarium-ml"
+"Source Code" = "https://github.com/cellarium-ai/cellarium-ml"
+"Bug Tracker" = "https://github.com/cellarium-ai/cellarium-ml/issues"
+"Discussion Forum" = "https://github.com/cellarium-ai/cellarium-ml/discussions"
+
+[tool.setuptools.packages.find]
+include = ["funsor.*"]
+
+[tool.setuptools.package-data]
+"funsor" = ["py.typed"]
+
+[tool.setuptools-git-versioning]
+enabled = true
+dev_template = "{tag}.post{ccount}"
+
+[tool.ruff]
+line-length = 120
+extend-include = ["*.ipynb"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+ignore_missing_imports = true
+explicit_package_bases = true
+check_untyped_defs = true
+warn_unreachable = true
