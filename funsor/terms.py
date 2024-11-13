@@ -75,6 +75,16 @@ def is_impure_node(node: fx.Node) -> bool:
 
 
 class Funsor(fx.Proxy):
+    """
+    Abstract base class for immutable functional tensors.
+
+    Args:
+        node:
+            The underlying FX node.
+        tracer:
+            The tracer to use for creating the Funsor.
+    """
+
     def __init__(
         self,
         node: fx.Node,
@@ -84,20 +94,23 @@ class Funsor(fx.Proxy):
             tracer = tracer_stack[-1]
         super().__init__(node, tracer)
 
+        # generate the funsor graph
         memo = {}
         self.funsor_graph = fx.Graph(tracer_cls=type(tracer))
         self.funsor_graph.graph_copy(tracer.graph, val_map=memo, return_output_node=False)
         self.funsor_graph.output(memo[node], type_expr=node.type)
         self.funsor_graph.eliminate_dead_code(is_impure_node=is_impure_node)
 
+        # generate the python code
         python_code = self.funsor_graph.python_code(root_module="self")
         self._code = python_code.src
         self._lineno_map = python_code._lineno_map
         co_fields = {}
         self.forward = _forward_from_src(self._code, python_code.globals, co_fields)
-        sig = inspect.signature(self.forward)
 
+        # generate the type hints
         self.inputs = {}
+        sig = inspect.signature(self.forward)
         for name, param in sig.parameters.items():
             if name == "self":
                 continue
@@ -113,6 +126,7 @@ class Funsor(fx.Proxy):
         type_hints["return"] = self.output
         return type_hints
 
+    # TODO: revisit this
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Funsor):
             return False
@@ -170,7 +184,26 @@ class Funsor(fx.Proxy):
 
 
 class Variable(Funsor):
-    def __init__(self, name: str, output: Any = None, tracer: FunsorTracer | None = None):
+    """
+    Funsor representing a single free variable.
+
+    Example:
+
+    >>> x = Variable("x")
+    >>> y = Variable("y")
+    >>> f = x * y + x
+    >>> f(x=1, y=2)
+
+    Args:
+        name:
+            The name of the variable.
+        output:
+            The output type of the variable.
+        tracer:
+            The tracer to use for creating the variable.
+    """
+
+    def __init__(self, name: str, output: Any = None, tracer: FunsorTracer | None = None) -> None:
         if tracer is None:
             tracer = tracer_stack[-1]
         placeholder_node = tracer.create_node("placeholder", name, (), {}, type_expr=output)
@@ -181,5 +214,5 @@ class Variable(Funsor):
     def name(self) -> str:
         return self.node.name
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Variable({self.node.name}: {self.output})"
