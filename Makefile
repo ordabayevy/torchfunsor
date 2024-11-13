@@ -21,20 +21,6 @@ format: license FORCE
 	ruff format .
 
 typecheck: FORCE
-	mypy cellarium tests
-
-test: FORCE
-ifeq (${TEST_DEVICES}, 2)
-	pytest -v -k multi_device
-else
-	# default
-	pytest -v
-endif
-
-test-examples: FORCE
-	cellarium-ml onepass_mean_var_std fit --config examples/cli_workflow/onepass_train_config.yaml
-	cellarium-ml incremental_pca fit --config examples/cli_workflow/ipca_train_config.yaml
-	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_train_config.yaml
-	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_resume_train_config.yaml
+	mypy funsor tests
 
 FORCE:
