@@ -200,7 +200,7 @@ class Funsor(MetaProxy):
         super().install_tensor_meta(tensor_meta)
 
     @property
-    def graph(self):
+    def graph(self) -> fx.Graph:
         if self._graph is None:
             memo = {}
             self._graph = fx.Graph(tracer_cls=type(self.tracer))
