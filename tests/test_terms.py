@@ -27,8 +27,7 @@ def test_variable():
 def test_substitute():
     x = Variable("x", dtype=torch.float32)
     y = Variable("y", dtype=torch.float32)
-    z = Variable("z", dtype=torch.float32)
-
+    z = Variable("z", dtype=torch.long)
     f = x * y + x * z
 
     assert f(y=2) == x * 2 + x * z

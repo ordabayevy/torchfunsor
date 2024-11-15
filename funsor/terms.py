@@ -1,15 +1,30 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
 from collections.abc import Callable
 from typing import Annotated, Any
 
 import torch
 import torch.fx as fx
+import torch.utils._pytree as pytree
 from torch._C import ScriptObject  # type: ignore[attr-defined]
 from torch._library.fake_class_registry import FakeScriptObject
-from torch.fx.experimental.meta_tracer import MetaProxy, MetaTracer, gen_constructor_wrapper
+from torch.fx.experimental.meta_tracer import (
+    MetaProxy,
+    MetaTracer,
+    gen_constructor_wrapper,
+    manual_meta_overrides,
+)
 from torch.fx.node import Argument, Target
+
+
+def node_to_meta(v):
+    if isinstance(v, fx.Node):
+        meta_val = v.meta.get("val")
+        assert meta_val is not None, f"Node {v} does not have a meta value"
+        return meta_val
+    return v
 
 
 class FunsorTracer(MetaTracer):
@@ -32,6 +47,14 @@ class FunsorTracer(MetaTracer):
             setattr(torch, name, wrapper)
             self.orig_fns.add(orig)
 
+    def create_arg(self, a: Any) -> Argument:
+        if isinstance(a, torch.Tensor):
+            meta_val = a.to(device="meta")
+            a = super().create_arg(a)
+            a.meta["val"] = meta_val
+            return a
+        return super().create_arg(a)
+
     def create_proxy(
         self,
         kind: str,
@@ -47,7 +70,74 @@ class FunsorTracer(MetaTracer):
             def proxy_factory_fn(node):
                 return Funsor(node, self)
 
-        return super().create_proxy(kind, target, args, kwargs, name, type_expr, proxy_factory_fn)
+        rv = fx.Tracer.create_proxy(self, kind, target, args, kwargs, name, type_expr, proxy_factory_fn)
+
+        if kind == "placeholder" and target in self.meta_args:
+            raise ValueError("Should not be here")
+
+        if target in self.orig_fns:
+            # NOTE: tensor constructors in PyTorch define the `device` argument as
+            # *kwargs-only*. That is why this works. If you add methods to
+            # _TORCH_METHODS_TO_PATCH that do not define `device` as kwarg-only,
+            # this will break and you will likely see issues where we cannot infer
+            # the size of the output.
+            if "device" in kwargs:
+                kwargs["device"] = "meta"
+
+        try:
+            args_metas = pytree.tree_map(node_to_meta, rv.node.args)
+            kwargs_metas = pytree.tree_map(node_to_meta, rv.node.kwargs)
+
+            if kind == "call_function":
+                meta_target = manual_meta_overrides.get(target, target)
+                meta_out = meta_target(*args_metas, **kwargs_metas)
+            elif kind == "call_method":
+                if target == "__getitem__":
+                    # Scalar tensors lead to the following error:
+                    # RuntimeError: Tensor.item() cannot be called on meta tensors
+                    # This is a workaround to convert scalar tensors to Python scalars
+                    indices = args_metas[1]
+                    new_indices = ()
+                    for index in indices:
+                        if isinstance(index, torch.Tensor) and index.ndim == 0:
+                            new_indices += (0,)
+                        else:
+                            new_indices += (index,)
+                    args_metas = (args_metas[0], new_indices)
+                meta_out = getattr(args_metas[0], target)(*args_metas[1:], **kwargs_metas)  # type: ignore[index]
+            elif kind == "call_module":
+                assert hasattr(self, "orig_forward")
+                self._disable_module_getattr = True
+                try:
+                    mod = self.root.get_submodule(target)
+                    mod_type = type(mod)
+                    if mod_type in manual_meta_overrides:
+                        meta_out = manual_meta_overrides[mod_type](mod, *args_metas, **kwargs_metas)  # type: ignore[misc, arg-type]
+                    else:
+                        meta_out = self.orig_forward(*args_metas, **kwargs_metas)
+                finally:
+                    self._disable_module_getattr = False
+            elif kind == "get_attr":
+                self._disable_module_getattr = True
+                try:
+                    attr_itr = self.root
+                    atoms = target.split(".")
+                    for atom in atoms:
+                        attr_itr = getattr(attr_itr, atom)
+                    assert isinstance(attr_itr, torch.Tensor)
+                    meta_out = attr_itr.to(device="meta")
+                finally:
+                    self._disable_module_getattr = False
+            else:
+                return rv
+
+            # TODO
+            assert isinstance(rv, torch.fx.Proxy), "Dont support composite output yet"
+            rv.install_tensor_meta(meta_out)
+        except Exception as e:
+            warnings.warn(f"Could not compute metadata for {kind} target {target}: {e}")
+
+        return rv
 
     def create_node(
         self,
