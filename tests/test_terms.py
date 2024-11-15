@@ -10,10 +10,10 @@ from funsor import Variable
 
 
 def test_variable():
-    x = Variable("x")
+    x = Variable("x", dtype=torch.float32)
     assert x("x") is x
     assert x(x) is x
-    y = Variable("y")
+    y = Variable("y", dtype=torch.float32)
     assert x("y") is y
     assert x(x="y") is y
     assert x(x=y) is y
@@ -25,9 +25,9 @@ def test_variable():
 
 
 def test_substitute():
-    x = Variable("x")
-    y = Variable("y")
-    z = Variable("z")
+    x = Variable("x", dtype=torch.float32)
+    y = Variable("y", dtype=torch.float32)
+    z = Variable("z", dtype=torch.float32)
 
     f = x * y + x * z
 
@@ -44,7 +44,7 @@ def test_substitute():
 def test_operator_unary(op, value):
     expected = getattr(operator, op)(value)
 
-    x = Variable("x")
+    x = Variable("x", dtype=torch.float32)
     lazy_unary = getattr(operator, op)(x)
     actual = lazy_unary(value)
 
@@ -70,7 +70,7 @@ def test_operator_unary(op, value):
 def test_torch_unary(op, value):
     expected = getattr(torch, op)(value)
 
-    x = Variable("x")
+    x = Variable("x", dtype=torch.float32)
     lazy_unary = getattr(torch, op)(x)
     actual = lazy_unary(value)
 
@@ -106,8 +106,8 @@ def test_binary(binary_op, value1, value2):
     except ZeroDivisionError:
         return
 
-    x1 = Variable("x1")
-    x2 = Variable("x2")
+    x1 = Variable("x1", dtype=torch.float32)
+    x2 = Variable("x2", dtype=torch.float32)
     actual = binary_op(x1, x2)(value1, value2)
 
     assert actual == expected
@@ -129,9 +129,9 @@ REDUCE_OPS = [
 
 @pytest.mark.parametrize("reduce_op", REDUCE_OPS)
 def test_reduce_all(reduce_op):
-    x = Variable("x")
-    y = Variable("y")
-    z = Variable("z")
+    x = Variable("x", dtype=torch.float32)
+    y = Variable("y", dtype=torch.float32)
+    z = Variable("z", dtype=torch.float32)
     x_value = torch.arange(2)
     y_value = torch.randn(3)
     z_value = torch.rand(4)

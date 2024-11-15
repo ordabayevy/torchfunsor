@@ -1,19 +1,18 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
 import torch
 import torch.fx as fx
 from torch._C import ScriptObject  # type: ignore[attr-defined]
 from torch._library.fake_class_registry import FakeScriptObject
-from torch.fx.graph_module import _forward_from_src
+from torch.fx.experimental.meta_tracer import MetaProxy, MetaTracer, gen_constructor_wrapper
 from torch.fx.node import Argument, Target
 
 
-class FunsorTracer(fx.Tracer):
+class FunsorTracer(MetaTracer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.root = torch.nn.Module()
@@ -21,6 +20,17 @@ class FunsorTracer(fx.Tracer):
         self.tensor_attrs: dict[torch.Tensor | ScriptObject | FakeScriptObject, str] = {}
         self.variable_cache: dict[str, Variable] = {}
         self.node_cache: dict[Any, fx.Node] = {}
+
+        self.meta_args = {}
+
+        self.patched_torch_methods = {
+            target: gen_constructor_wrapper(getattr(torch, target)) for target in self._TORCH_METHODS_TO_PATCH
+        }
+        self.orig_fns = set()
+
+        for name, (wrapper, orig) in self.patched_torch_methods.items():
+            setattr(torch, name, wrapper)
+            self.orig_fns.add(orig)
 
     def create_proxy(
         self,
@@ -37,8 +47,7 @@ class FunsorTracer(fx.Tracer):
             def proxy_factory_fn(node):
                 return Funsor(node, self)
 
-        proxy = super().create_proxy(kind, target, args, kwargs, name, type_expr, proxy_factory_fn)
-        return proxy
+        return super().create_proxy(kind, target, args, kwargs, name, type_expr, proxy_factory_fn)
 
     def create_node(
         self,
@@ -57,8 +66,6 @@ class FunsorTracer(fx.Tracer):
             return self.node_cache[cache_key]
 
         # Otherwise, create the node and cache it
-        if type_expr is None:
-            type_expr = Any
         node = super().create_node(kind, target, args, kwargs, name, type_expr)
         self.node_cache[cache_key] = node
         return node
@@ -74,7 +81,7 @@ def is_impure_node(node: fx.Node) -> bool:
     return node.is_impure()
 
 
-class Funsor(fx.Proxy):
+class Funsor(MetaProxy):
     """
     Abstract base class for immutable functional tensors.
 
@@ -94,31 +101,38 @@ class Funsor(fx.Proxy):
             tracer = tracer_stack[-1]
         super().__init__(node, tracer)
 
-        # generate the funsor graph
-        memo = {}
-        self.funsor_graph = fx.Graph(tracer_cls=type(tracer))
-        self.funsor_graph.graph_copy(tracer.graph, val_map=memo, return_output_node=False)
-        self.funsor_graph.output(memo[node], type_expr=node.type)
-        self.funsor_graph.eliminate_dead_code(is_impure_node=is_impure_node)
+        self._inputs: dict[str, Any] | None = None
+        self._graph: fx.Graph | None = None
 
-        # generate the python code
-        python_code = self.funsor_graph.python_code(root_module="self")
-        self._code = python_code.src
-        self._lineno_map = python_code._lineno_map
-        co_fields = {}
-        self.forward = _forward_from_src(self._code, python_code.globals, co_fields)
+    def install_tensor_meta(self, tensor_meta):
+        self.node.meta["val"] = tensor_meta
+        self.node.type = type(tensor_meta)
+        super().install_tensor_meta(tensor_meta)
 
-        # generate the type hints
-        self.inputs = {}
-        sig = inspect.signature(self.forward)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            elif param.annotation is inspect.Parameter.empty:
-                self.inputs[name] = Any
-            else:
-                self.inputs[name] = param.annotation
-        self.output = node.type
+    @property
+    def graph(self):
+        if self._graph is None:
+            memo = {}
+            self._graph = fx.Graph(tracer_cls=type(self.tracer))
+            self._graph.graph_copy(self.tracer.graph, val_map=memo, return_output_node=False)
+            self._graph.output(memo[self.node], type_expr=self.node.type)
+            self._graph.eliminate_dead_code(is_impure_node=is_impure_node)
+        return self._graph
+
+    @property
+    def inputs(self) -> dict[str, Any]:
+        if self._inputs is None:
+            self._inputs = {}
+            for graph_node in self.graph.nodes:
+                if graph_node.op == "placeholder":
+                    meta_val = graph_node.meta["val"]
+                    self._inputs[graph_node.name] = Annotated[type(meta_val), meta_val.dtype, tuple(meta_val.shape)]
+        return self._inputs
+
+    @property
+    def output(self) -> Any:
+        meta_val = self.node.meta["val"]
+        return Annotated[type(meta_val), meta_val.dtype, tuple(meta_val.shape)]
 
     @property
     def __annotations__(self) -> dict[str, Any]:
@@ -155,12 +169,11 @@ class Funsor(fx.Proxy):
                 # TODO: Handle creating new variables
                 subs[key] = self.tracer.variable_cache[subs[key]]
 
-        subs["self"] = self.tracer.root
-
-        return self.forward(**subs)
+        interpreter = fx.Interpreter(self.tracer.root, graph=self.graph)
+        return interpreter.run(*tuple(subs[key] for key in self.inputs))
 
     def __repr__(self) -> str:
-        return f"Funsor({', '.join([f'{key}: {value}' for key, value in self.inputs.items()])}) -> {self.output}"
+        return f"Funsor({', '.join([f'{name}: {output}' for name, output in self.inputs.items()])}) -> {self.output}"
 
     def reduce(self, reduce_op: Callable, reduced_vars: dict[str, torch.Tensor]) -> torch.Tensor:
         for key, value in reduced_vars.items():
@@ -197,17 +210,25 @@ class Variable(Funsor):
     Args:
         name:
             The name of the variable.
-        output:
-            The output type of the variable.
+        dtype:
+            The data type of the variable.
+        shape:
+            The shape of the variable.
         tracer:
             The tracer to use for creating the variable.
     """
 
-    def __init__(self, name: str, output: Any = None, tracer: FunsorTracer | None = None) -> None:
+    def __init__(
+        self, name: str, dtype: torch.dtype, shape: tuple[int, ...] = (), tracer: FunsorTracer | None = None
+    ) -> None:
         if tracer is None:
             tracer = tracer_stack[-1]
-        placeholder_node = tracer.create_node("placeholder", name, (), {}, type_expr=output)
+        tracer.meta_args[name] = torch.empty(shape, dtype=dtype, device="meta")
+
+        placeholder_node = tracer.create_node("placeholder", name, (), {})
         super().__init__(placeholder_node, tracer)
+
+        self.install_tensor_meta(tracer.meta_args[name])
         tracer.variable_cache[name] = self
 
     @property
